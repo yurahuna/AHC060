@@ -1,13 +1,12 @@
 use rand::prelude::*;
 use rand::rngs::StdRng;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::io::{self, BufRead, Write};
 
 const FLIP_PROB: f64 = 0.02;
 const MAX_R_RATIO: f64 = 1.0;
 const MAX_CONE_LEN: usize = 10;
 // Exponent for shop-density weighting when choosing next move.
-// 0.0 = uniform random, higher = stronger bias toward shop-dense areas.
 const ATTRACTION_TEMP: f64 = 1.5;
 
 fn main() {
@@ -127,7 +126,28 @@ fn main() {
                 if !shop_candidates.is_empty() {
                     weighted_next(&shop_candidates, &mut rng)
                 } else {
-                    weighted_next(candidates, &mut rng)
+                    // BFS from all novel shops to find nearest; follow that direction
+                    let mut dist = vec![usize::MAX; n];
+                    let mut queue = VecDeque::new();
+                    for s in 0..k {
+                        if !shops[s].contains(&cone) {
+                            dist[s] = 0;
+                            queue.push_back(s);
+                        }
+                    }
+                    while let Some(v) = queue.pop_front() {
+                        for &u in &adj[v] {
+                            if dist[u] == usize::MAX {
+                                dist[u] = dist[v] + 1;
+                                queue.push_back(u);
+                            }
+                        }
+                    }
+                    if let Some(&best) = candidates.iter().min_by_key(|&&v| dist[v]) {
+                        best
+                    } else {
+                        weighted_next(candidates, &mut rng)
+                    }
                 }
             } else {
                 weighted_next(candidates, &mut rng)
