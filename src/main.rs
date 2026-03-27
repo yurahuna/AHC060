@@ -3,6 +3,10 @@ use rand::rngs::StdRng;
 use std::collections::BTreeSet;
 use std::io::{self, BufRead, Write};
 
+const FLIP_PROB: f64 = 0.02;
+const MAX_R_RATIO: f64 = 1.0;
+const MAX_CONE_LEN: usize = 10;
+
 fn main() {
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
@@ -38,6 +42,8 @@ fn main() {
     let mut cone: Vec<char> = vec![];
     let mut ice_type: Vec<char> = vec!['W'; n];
     let mut shops: Vec<BTreeSet<Vec<char>>> = vec![BTreeSet::new(); k];
+    let max_r = ((n - k) as f64 * MAX_R_RATIO).round() as usize;
+    let mut r_count = 0usize;
 
     let stdout = io::stdout();
     let mut out = io::BufWriter::new(stdout.lock());
@@ -50,16 +56,28 @@ fn main() {
             .filter(|&v| Some(v) != prev)
             .collect();
 
-        // Action 2 is possible only if pos >= k and ice_type[pos] == 'W'
-        let can_flip = pos >= k && ice_type[pos] == 'W';
+        // Action 2 is possible only if pos >= k, ice_type[pos] == 'W', and under the R cap
+        let can_flip = pos >= k && ice_type[pos] == 'W' && r_count < max_r;
 
-        if can_flip && rng.gen_bool(0.3) {
+        if can_flip && rng.gen_bool(FLIP_PROB) {
             // Do action 2: flip to strawberry
             writeln!(out, "-1").unwrap();
             ice_type[pos] = 'R';
+            r_count += 1;
         } else {
             // Action 1: move to a random valid neighbor
-            let &next = neighbors.choose(&mut rng).unwrap();
+            // If cone is at the limit, prefer neighbors that are shops
+            let next = if cone.len() >= MAX_CONE_LEN {
+                let shop_neighbors: Vec<usize> =
+                    neighbors.iter().copied().filter(|&v| v < k).collect();
+                if !shop_neighbors.is_empty() {
+                    *shop_neighbors.choose(&mut rng).unwrap()
+                } else {
+                    *neighbors.choose(&mut rng).unwrap()
+                }
+            } else {
+                *neighbors.choose(&mut rng).unwrap()
+            };
             writeln!(out, "{}", next).unwrap();
             prev = Some(pos);
             pos = next;
