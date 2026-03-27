@@ -34,9 +34,9 @@ fn main() {
     // State
     let mut rng = StdRng::seed_from_u64(42);
     let mut pos: usize = 0;
-    let mut prev: Option<usize> = None; // previous source vertex of last Move action
+    let mut prev: Option<usize> = None;
     let mut cone: Vec<char> = vec![];
-    let mut ice_type: Vec<char> = vec!['W'; n]; // only meaningful for k..n-1
+    let mut ice_type: Vec<char> = vec!['W'; n];
     let mut shops: Vec<BTreeSet<Vec<char>>> = vec![BTreeSet::new(); k];
 
     let stdout = io::stdout();
@@ -50,7 +50,6 @@ fn main() {
             .filter(|&v| Some(v) != prev)
             .collect();
 
-        // Decide whether to try action 2 first
         // Action 2 is possible only if pos >= k and ice_type[pos] == 'W'
         let can_flip = pos >= k && ice_type[pos] == 'W';
 
@@ -79,4 +78,3 @@ fn main() {
     let score: usize = shops.iter().map(|s| s.len()).sum();
     eprintln!("Score = {}", score);
 }
-
