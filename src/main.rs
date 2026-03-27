@@ -66,17 +66,28 @@ fn main() {
             r_count += 1;
         } else {
             // Action 1: move to a random valid neighbor
-            // If cone is at the limit, prefer neighbors that are shops
+            // Avoid shops that already have the current cone
+            // If cone is at the limit, prefer shops that don't have the cone yet
+            let novel_neighbors: Vec<usize> = neighbors
+                .iter()
+                .copied()
+                .filter(|&v| v >= k || !shops[v].contains(&cone))
+                .collect();
+            let candidates = if novel_neighbors.is_empty() {
+                &neighbors
+            } else {
+                &novel_neighbors
+            };
             let next = if cone.len() >= MAX_CONE_LEN {
-                let shop_neighbors: Vec<usize> =
-                    neighbors.iter().copied().filter(|&v| v < k).collect();
-                if !shop_neighbors.is_empty() {
-                    *shop_neighbors.choose(&mut rng).unwrap()
+                let shop_candidates: Vec<usize> =
+                    candidates.iter().copied().filter(|&v| v < k).collect();
+                if !shop_candidates.is_empty() {
+                    *shop_candidates.choose(&mut rng).unwrap()
                 } else {
-                    *neighbors.choose(&mut rng).unwrap()
+                    *candidates.choose(&mut rng).unwrap()
                 }
             } else {
-                *neighbors.choose(&mut rng).unwrap()
+                *candidates.choose(&mut rng).unwrap()
             };
             writeln!(out, "{}", next).unwrap();
             prev = Some(pos);
