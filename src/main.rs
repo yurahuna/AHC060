@@ -7,7 +7,7 @@ const FLIP_PROB: f64 = 0.02;
 const MAX_R_RATIO: f64 = 1.0;
 const MAX_CONE_LEN: usize = 10;
 // Exponent for shop-density weighting when choosing next move.
-const ATTRACTION_TEMP: f64 = 1.5;
+const ATTRACTION_TEMP: f64 = 0.85;
 
 fn main() {
     let stdin = io::stdin();
