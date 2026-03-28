@@ -120,7 +120,51 @@ fn main() {
                 }
                 chosen
             };
-            let next = if cone.len() >= MAX_CONE_LEN {
+            // Greedy: for each shop s, BFS from pos (not passing through other shops),
+            // compute projected cone (current cone + ice on trees along path),
+            // and follow the closest shop where that cone is a novel delivery.
+            let mut greedy_step: Option<usize> = None;
+            {
+                let mut best_d = usize::MAX;
+                for s in 0..k {
+                    let mut d = vec![usize::MAX; n];
+                    let mut par = vec![n; n];
+                    let mut q = VecDeque::new();
+                    d[pos] = 0;
+                    q.push_back(pos);
+                    'bfs: while let Some(v) = q.pop_front() {
+                        for &u in &adj[v] {
+                            if d[u] == usize::MAX && (u >= k || u == s) {
+                                d[u] = d[v] + 1;
+                                par[u] = v;
+                                q.push_back(u);
+                                if u == s { break 'bfs; }
+                            }
+                        }
+                    }
+                    if d[s] >= best_d { continue; }
+                    // Reconstruct path pos -> ... -> s
+                    let mut path = vec![];
+                    let mut cur = s;
+                    while cur != pos {
+                        path.push(cur);
+                        cur = par[cur];
+                    }
+                    path.reverse();
+                    if path.is_empty() { continue; }
+                    // Projected cone: current cone + ice from every tree on the path
+                    let mut proj = cone.clone();
+                    for &v in &path { if v >= k { proj.push(ice_type[v]); } }
+                    if shops[s].contains(&proj) { continue; }
+                    // First step must not be prev
+                    if Some(path[0]) == prev { continue; }
+                    best_d = d[s];
+                    greedy_step = Some(path[0]);
+                }
+            }
+            let next = if let Some(step) = greedy_step {
+                step
+            } else if cone.len() >= MAX_CONE_LEN {
                 let shop_candidates: Vec<usize> =
                     candidates.iter().copied().filter(|&v| v < k).collect();
                 if !shop_candidates.is_empty() {
@@ -152,7 +196,6 @@ fn main() {
             } else {
                 weighted_next(candidates, &mut rng)
             };
-            writeln!(out, "{}", next).unwrap();
             prev = Some(pos);
             pos = next;
             if pos < k {
