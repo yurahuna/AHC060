@@ -1,6 +1,6 @@
 use rand::prelude::*;
 use rand::rngs::StdRng;
-use std::collections::{BTreeSet, BinaryHeap, VecDeque};
+use std::collections::{BinaryHeap, HashSet, VecDeque};
 use std::io::{self, BufRead, Write};
 use std::time::Instant;
 
@@ -103,7 +103,7 @@ fn precompute_all_paths(
 ///
 /// Performance optimisations vs. the naive version:
 ///   - Cone represented as (val: u32, len: u8) bitmask — zero heap allocation in hot path.
-///   - Shop delivered-set stored as BTreeSet<u64> — no Vec<char> alloc per lookup/insert.
+///   - Shop delivered-set stored as HashSet<u64> — O(1) lookup/insert.
 ///   - ice_type as Vec<bool> (1 byte vs 4 bytes for char).
 ///   - Neighbour lists stored in fixed-size stack arrays — no Vec alloc per step.
 ///   - weighted_next uses a stack array for weights.
@@ -130,7 +130,7 @@ fn simulate(
     // false = W (vanilla), true = R (strawberry).
     let mut ice_is_r: Vec<bool> = vec![false; n];
     // Delivered cones per shop, keyed by cone_key(val, len).
-    let mut shops: Vec<BTreeSet<u64>> = vec![BTreeSet::new(); k];
+    let mut shops: Vec<HashSet<u64>> = (0..k).map(|_| HashSet::new()).collect();
     let max_r = ((n - k) as f64 * MAX_R_RATIO).round() as usize;
     let mut r_count = 0usize;
     let mut moves: Vec<i32> = Vec::with_capacity(t);
