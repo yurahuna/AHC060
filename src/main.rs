@@ -12,6 +12,8 @@ const K_PATHS: usize = 15;
 const MAX_PRECOMP_STATES: usize = 500;
 // Exponent for shop-density weighting when choosing next move.
 const ATTRACTION_TEMP: f64 = 2.0;
+// Exponent for shop saturation penalty: weight[s] *= 1/(1+deliveries[s])^SAT_ALPHA
+const SAT_ALPHA: f64 = 1.0;
 // Time limit in milliseconds (leave 100ms buffer from 2000ms judge limit).
 const TIME_LIMIT_MS: u128 = 1900;
 
@@ -22,28 +24,24 @@ fn cone_key(val: u32, len: u8) -> u64 {
     (val as u64) | ((len as u64) << 32)
 }
 
-/// Weighted random selection from pool using shop_attraction weights.
-/// Uses a stack array for weights to avoid heap allocation.
+/// Weighted random selection from pool.
+/// `weights_buf[i]` must be pre-computed for pool[i]. Uses only pool.len() entries.
 fn weighted_next(
     pool: &[usize],
-    shop_attraction: &[f64],
-    attraction_temp: f64,
+    weights_buf: &[f64; 32],
     rng: &mut StdRng,
 ) -> usize {
-    if attraction_temp == 0.0 || pool.len() == 1 {
-        return *pool.choose(rng).unwrap();
+    if pool.len() == 1 {
+        return pool[0];
     }
-    let mut weights = [0f64; 32];
-    let mut total = 0f64;
-    for (i, &v) in pool.iter().enumerate() {
-        let w = shop_attraction[v].powf(attraction_temp);
-        weights[i] = w;
-        total += w;
+    let total: f64 = weights_buf[..pool.len()].iter().sum();
+    if total <= 0.0 {
+        return *pool.choose(rng).unwrap();
     }
     let mut r = rng.random::<f64>() * total;
     let mut chosen = *pool.last().unwrap();
     for (i, &v) in pool.iter().enumerate() {
-        r -= weights[i];
+        r -= weights_buf[i];
         if r <= 0.0 {
             chosen = v;
             break;
@@ -114,10 +112,11 @@ fn simulate(
     t: usize,
     adj: &[Vec<usize>],
     precomp: &[Vec<Vec<(usize, usize, Vec<u8>)>>],
-    shop_attraction: &[f64],
+    shop_contrib: &[Vec<f64>],
     flip_prob: f64,
     max_cone_len: usize,
     attraction_temp: f64,
+    sat_alpha: f64,
     seed: u64,
 ) -> (Vec<i32>, usize) {
     let mut rng = StdRng::seed_from_u64(seed);
@@ -140,7 +139,21 @@ fn simulate(
     let mut nb_buf = [0usize; 32];
     let mut nov_buf = [0usize; 32];
     let mut shop_buf = [0usize; 16];
+    let mut wbuf = [0f64; 32];  // weights for weighted_next
     let mut bfs_queue: VecDeque<usize> = VecDeque::with_capacity(n);
+
+    // Compute dynamic weight for vertex v based on current shop saturation.
+    // weight(v) = (Σ_s shop_contrib[v][s] / (1+deliveries[s])^sat_alpha)^attraction_temp
+    let dyn_weight = |v: usize, shops: &[HashSet<u64>]| -> f64 {
+        let raw: f64 = if sat_alpha == 0.0 {
+            shop_contrib[v].iter().sum()
+        } else {
+            shop_contrib[v].iter().enumerate()
+                .map(|(s, &c)| c / (1.0 + shops[s].len() as f64).powf(sat_alpha))
+                .sum()
+        };
+        if attraction_temp == 1.0 { raw } else { raw.powf(attraction_temp) }
+    };
 
     for _ in 0..t {
         // Build neighbour list, excluding the vertex we came from.
@@ -207,7 +220,10 @@ fn simulate(
                     }
                 }
                 if sc_len > 0 {
-                    weighted_next(&shop_buf[..sc_len], shop_attraction, attraction_temp, &mut rng)
+                    for (i, &v) in shop_buf[..sc_len].iter().enumerate() {
+                        wbuf[i] = dyn_weight(v, &shops);
+                    }
+                    weighted_next(&shop_buf[..sc_len], &wbuf, &mut rng)
                 } else {
                     let mut dist = vec![usize::MAX; n];
                     bfs_queue.clear();
@@ -228,11 +244,17 @@ fn simulate(
                     if let Some(&best) = candidates.iter().min_by_key(|&&v| dist[v]) {
                         best
                     } else {
-                        weighted_next(candidates, shop_attraction, attraction_temp, &mut rng)
+                        for (i, &v) in candidates.iter().enumerate() {
+                            wbuf[i] = dyn_weight(v, &shops);
+                        }
+                        weighted_next(candidates, &wbuf, &mut rng)
                     }
                 }
             } else {
-                weighted_next(candidates, shop_attraction, attraction_temp, &mut rng)
+                for (i, &v) in candidates.iter().enumerate() {
+                    wbuf[i] = dyn_weight(v, &shops);
+                }
+                weighted_next(candidates, &wbuf, &mut rng)
             };
 
             if !neighbors.contains(&next) {
@@ -296,13 +318,14 @@ fn main() {
     let flip_prob: f64 = std::env::var("FLIP_PROB").ok().and_then(|s| s.parse().ok()).unwrap_or(FLIP_PROB);
     let max_cone_len: usize = std::env::var("MAX_CONE_LEN").ok().and_then(|s| s.parse().ok()).unwrap_or(MAX_CONE_LEN);
     let attraction_temp: f64 = std::env::var("ATTRACTION_TEMP").ok().and_then(|s| s.parse().ok()).unwrap_or(ATTRACTION_TEMP);
+    let sat_alpha: f64 = std::env::var("SAT_ALPHA").ok().and_then(|s| s.parse().ok()).unwrap_or(SAT_ALPHA);
     let k_paths: usize = std::env::var("K_PATHS").ok().and_then(|s| s.parse().ok()).unwrap_or(K_PATHS);
     let time_limit_ms: u128 = std::env::var("TIME_LIMIT_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(TIME_LIMIT_MS);
 
     let precomp = precompute_all_paths(n, k, &adj, k_paths, MAX_PRECOMP_STATES);
 
-    // Precompute static shop attraction for each vertex: sum of 1/dist to each shop
-    let shop_attraction: Vec<f64> = (0..n)
+    // Precompute per-vertex per-shop Euclidean contribution: shop_contrib[v][s] = 1/dist(v,s)
+    let shop_contrib: Vec<Vec<f64>> = (0..n)
         .map(|v| {
             (0..k)
                 .map(|s| {
@@ -311,7 +334,7 @@ fn main() {
                     let dist = ((dx * dx + dy * dy) as f64).sqrt().max(1.0);
                     1.0 / dist
                 })
-                .sum::<f64>()
+                .collect()
         })
         .collect();
 
@@ -321,8 +344,8 @@ fn main() {
     let mut best_score = 0usize;
     let mut trial = 0u64;
     loop {
-        let (moves, score) = simulate(n, k, t, &adj, &precomp, &shop_attraction,
-            flip_prob, max_cone_len, attraction_temp, trial);
+        let (moves, score) = simulate(n, k, t, &adj, &precomp, &shop_contrib,
+            flip_prob, max_cone_len, attraction_temp, sat_alpha, trial);
         if score > best_score {
             best_score = score;
             best_moves = moves;
