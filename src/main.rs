@@ -80,7 +80,7 @@ fn main() {
         // Action 2 is possible only if pos >= k, ice_type[pos] == 'W', and under the R cap
         let can_flip = pos >= k && ice_type[pos] == 'W' && r_count < max_r;
 
-        if can_flip && rng.gen_bool(FLIP_PROB) {
+        if can_flip && rng.random_bool(FLIP_PROB) {
             // Do action 2: flip to strawberry
             writeln!(out, "-1").unwrap();
             ice_type[pos] = 'R';
@@ -109,7 +109,7 @@ fn main() {
                     .map(|&v| shop_attraction[v].powf(ATTRACTION_TEMP))
                     .collect();
                 let total: f64 = weights.iter().sum();
-                let mut r = rng.r#gen::<f64>() * total;
+                let mut r = rng.random::<f64>() * total;
                 let mut chosen = *pool.last().unwrap();
                 for (i, &w) in weights.iter().enumerate() {
                     r -= w;
