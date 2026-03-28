@@ -81,7 +81,9 @@ precomp[v][s] = [(距離, 最初の移動先, 通過する木のリスト), ...]
 
 `weighted_next` の重み：
 
-$$w(v) = \left(\sum_{s=0}^{K-1} \frac{1}{d_{\text{euclidean}}(v, s)}\right)^{\text{ATTRACTION\_TEMP}}$$
+$$w(v) = \left(\sum_{s=0}^{K-1} \frac{1}{d(v, s)}\right)^{\alpha}$$
+
+（$d(v,s)$ はユークリッド距離、$\alpha$ = ATTRACTION_TEMP）
 
 ショップに近い頂点ほど高確率で選ばれる（ATTRACTION_TEMP=2.0）。
 
