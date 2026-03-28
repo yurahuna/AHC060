@@ -1,13 +1,62 @@
 use rand::prelude::*;
 use rand::rngs::StdRng;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, BinaryHeap, VecDeque};
 use std::io::{self, BufRead, Write};
 
 const FLIP_PROB: f64 = 0.02;
 const MAX_R_RATIO: f64 = 1.0;
 const MAX_CONE_LEN: usize = 10;
+const USE_GREEDY_BFS: bool = true;
+const K_PATHS: usize = 10;
+const MAX_PRECOMP_STATES: usize = 500;
 // Exponent for shop-density weighting when choosing next move.
 const ATTRACTION_TEMP: f64 = 0.85;
+
+/// Precompute up to `k_max` shortest simple paths from every vertex v to every shop s,
+/// not passing through any other shop. Paths are stored as ordered sequences of tree
+/// vertex indices (u8) so that ice_type can be resolved at runtime.
+/// Returns precomp[v][s] = Vec<(path_len, first_step, trees)> sorted by path_len.
+fn precompute_all_paths(
+    n: usize,
+    k: usize,
+    adj: &[Vec<usize>],
+    k_max: usize,
+    max_states: usize,
+) -> Vec<Vec<Vec<(usize, usize, Vec<u8>)>>> {
+    let mut precomp = vec![vec![vec![]; k]; n];
+    for v in 0..n {
+        for s in 0..k {
+            if v == s { continue; }
+            // heap state: Reverse((len, cur, visited_mask, first_step, trees_so_far))
+            let mut heap: BinaryHeap<std::cmp::Reverse<(usize, usize, u128, usize, Vec<u8>)>> =
+                BinaryHeap::new();
+            heap.push(std::cmp::Reverse((0, v, 1u128 << v, usize::MAX, vec![])));
+            let mut expanded = 0usize;
+            while let Some(std::cmp::Reverse((len, cur, visited, first, trees))) = heap.pop() {
+                expanded += 1;
+                if expanded > max_states { break; }
+                if cur == s {
+                    if first == usize::MAX { continue; }
+                    precomp[v][s].push((len, first, trees));
+                    if precomp[v][s].len() >= k_max { break; }
+                    continue;
+                }
+                for &next in &adj[cur] {
+                    if (next >= k || next == s) && (visited >> next) & 1 == 0 {
+                        let new_first = if first == usize::MAX { next } else { first };
+                        let new_visited = visited | (1u128 << next);
+                        let mut new_trees = trees.clone();
+                        if next >= k { new_trees.push(next as u8); }
+                        heap.push(std::cmp::Reverse((
+                            len + 1, next, new_visited, new_first, new_trees,
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    precomp
+}
 
 fn main() {
     let stdin = io::stdin();
@@ -41,6 +90,8 @@ fn main() {
         let y: i64 = it.next().unwrap().parse().unwrap();
         coords[i] = (x, y);
     }
+
+    let precomp = precompute_all_paths(n, k, &adj, K_PATHS, MAX_PRECOMP_STATES);
 
     // Precompute static shop attraction for each vertex: sum of 1/dist to each shop
     let shop_attraction: Vec<f64> = (0..n)
@@ -120,49 +171,27 @@ fn main() {
                 }
                 chosen
             };
-            // Greedy: for each shop s, BFS from pos (not passing through other shops),
-            // compute projected cone (current cone + ice on trees along path),
-            // and follow the closest shop where that cone is a novel delivery.
+            // Greedy: look up precomputed k shortest paths to each shop,
+            // project the cone through current ice_type, find closest novel delivery.
             let mut greedy_step: Option<usize> = None;
-            {
+            if USE_GREEDY_BFS {
                 let mut best_d = usize::MAX;
                 for s in 0..k {
-                    let mut d = vec![usize::MAX; n];
-                    let mut par = vec![n; n];
-                    let mut q = VecDeque::new();
-                    d[pos] = 0;
-                    q.push_back(pos);
-                    'bfs: while let Some(v) = q.pop_front() {
-                        for &u in &adj[v] {
-                            if d[u] == usize::MAX && (u >= k || u == s) {
-                                d[u] = d[v] + 1;
-                                par[u] = v;
-                                q.push_back(u);
-                                if u == s { break 'bfs; }
-                            }
+                    for (d, first_step, trees) in &precomp[pos][s] {
+                        if *d >= best_d { break; }
+                        if Some(*first_step) == prev { continue; }
+                        let mut proj = cone.clone();
+                        for &t in trees {
+                            proj.push(ice_type[t as usize]);
                         }
+                        if shops[s].contains(&proj) { continue; }
+                        best_d = *d;
+                        greedy_step = Some(*first_step);
+                        break;
                     }
-                    if d[s] >= best_d { continue; }
-                    // Reconstruct path pos -> ... -> s
-                    let mut path = vec![];
-                    let mut cur = s;
-                    while cur != pos {
-                        path.push(cur);
-                        cur = par[cur];
-                    }
-                    path.reverse();
-                    if path.is_empty() { continue; }
-                    // Projected cone: current cone + ice from every tree on the path
-                    let mut proj = cone.clone();
-                    for &v in &path { if v >= k { proj.push(ice_type[v]); } }
-                    if shops[s].contains(&proj) { continue; }
-                    // First step must not be prev
-                    if Some(path[0]) == prev { continue; }
-                    best_d = d[s];
-                    greedy_step = Some(path[0]);
                 }
             }
-            let next = if let Some(step) = greedy_step {
+            let mut next = if let Some(step) = greedy_step {
                 step
             } else if cone.len() >= MAX_CONE_LEN {
                 let shop_candidates: Vec<usize> =
@@ -196,6 +225,12 @@ fn main() {
             } else {
                 weighted_next(candidates, &mut rng)
             };
+
+            if !neighbors.contains(&next) {
+                next = neighbors[0];
+            }
+
+            writeln!(out, "{}", next).unwrap();
             prev = Some(pos);
             pos = next;
             if pos < k {
