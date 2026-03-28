@@ -15,6 +15,43 @@ const ATTRACTION_TEMP: f64 = 2.0;
 // Time limit in milliseconds (leave 100ms buffer from 2000ms judge limit).
 const TIME_LIMIT_MS: u128 = 1900;
 
+/// Encode cone as a u64 key: bits 0-31 = R-bit flags (bit i=1 means R at position i),
+/// bits 32-39 = cone length. Supports cone_len up to 255, val bits 0-31.
+#[inline(always)]
+fn cone_key(val: u32, len: u8) -> u64 {
+    (val as u64) | ((len as u64) << 32)
+}
+
+/// Weighted random selection from pool using shop_attraction weights.
+/// Uses a stack array for weights to avoid heap allocation.
+fn weighted_next(
+    pool: &[usize],
+    shop_attraction: &[f64],
+    attraction_temp: f64,
+    rng: &mut StdRng,
+) -> usize {
+    if attraction_temp == 0.0 || pool.len() == 1 {
+        return *pool.choose(rng).unwrap();
+    }
+    let mut weights = [0f64; 32];
+    let mut total = 0f64;
+    for (i, &v) in pool.iter().enumerate() {
+        let w = shop_attraction[v].powf(attraction_temp);
+        weights[i] = w;
+        total += w;
+    }
+    let mut r = rng.random::<f64>() * total;
+    let mut chosen = *pool.last().unwrap();
+    for (i, &v) in pool.iter().enumerate() {
+        r -= weights[i];
+        if r <= 0.0 {
+            chosen = v;
+            break;
+        }
+    }
+    chosen
+}
+
 /// Precompute up to `k_max` shortest simple paths from every vertex v to every shop s,
 /// not passing through any other shop. Paths are stored as ordered sequences of tree
 /// vertex indices (u8) so that ice_type can be resolved at runtime.
@@ -63,6 +100,14 @@ fn precompute_all_paths(
 
 /// Run one simulation trial with the given RNG seed.
 /// Returns (moves, score) where each move is -1 (flip) or the target vertex index.
+///
+/// Performance optimisations vs. the naive version:
+///   - Cone represented as (val: u32, len: u8) bitmask — zero heap allocation in hot path.
+///   - Shop delivered-set stored as BTreeSet<u64> — no Vec<char> alloc per lookup/insert.
+///   - ice_type as Vec<bool> (1 byte vs 4 bytes for char).
+///   - Neighbour lists stored in fixed-size stack arrays — no Vec alloc per step.
+///   - weighted_next uses a stack array for weights.
+///   - prev stored as usize (usize::MAX = "no previous") — no Option overhead.
 fn simulate(
     n: usize,
     k: usize,
@@ -77,59 +122,55 @@ fn simulate(
 ) -> (Vec<i32>, usize) {
     let mut rng = StdRng::seed_from_u64(seed);
     let mut pos: usize = 0;
-    let mut prev: Option<usize> = None;
-    let mut cone: Vec<char> = vec![];
-    let mut ice_type: Vec<char> = vec!['W'; n];
-    let mut shops: Vec<BTreeSet<Vec<char>>> = vec![BTreeSet::new(); k];
+    // usize::MAX means "no previous move" (no valid vertex has this index).
+    let mut prev: usize = usize::MAX;
+    // Cone as bitmask: bit i = 1 → position i is R, 0 → W.
+    let mut cone_val: u32 = 0;
+    let mut cone_len: u8 = 0;
+    // false = W (vanilla), true = R (strawberry).
+    let mut ice_is_r: Vec<bool> = vec![false; n];
+    // Delivered cones per shop, keyed by cone_key(val, len).
+    let mut shops: Vec<BTreeSet<u64>> = vec![BTreeSet::new(); k];
     let max_r = ((n - k) as f64 * MAX_R_RATIO).round() as usize;
     let mut r_count = 0usize;
     let mut moves: Vec<i32> = Vec::with_capacity(t);
 
-    let weighted_next = |pool: &[usize], rng: &mut StdRng| -> usize {
-        if attraction_temp == 0.0 || pool.len() == 1 {
-            return *pool.choose(rng).unwrap();
-        }
-        let weights: Vec<f64> = pool
-            .iter()
-            .map(|&v| shop_attraction[v].powf(attraction_temp))
-            .collect();
-        let total: f64 = weights.iter().sum();
-        let mut r = rng.random::<f64>() * total;
-        let mut chosen = *pool.last().unwrap();
-        for (i, &w) in weights.iter().enumerate() {
-            r -= w;
-            if r <= 0.0 {
-                chosen = pool[i];
-                break;
-            }
-        }
-        chosen
-    };
+    // Pre-allocated stack buffers — reused every step to avoid Vec allocs.
+    // Max degree in these graphs is well below 32.
+    let mut nb_buf = [0usize; 32];
+    let mut nov_buf = [0usize; 32];
+    let mut shop_buf = [0usize; 16];
+    let mut bfs_queue: VecDeque<usize> = VecDeque::with_capacity(n);
 
     for _ in 0..t {
-        let neighbors: Vec<usize> = adj[pos]
-            .iter()
-            .copied()
-            .filter(|&v| Some(v) != prev)
-            .collect();
+        // Build neighbour list, excluding the vertex we came from.
+        let mut nb_len = 0usize;
+        for &v in &adj[pos] {
+            if v != prev {
+                nb_buf[nb_len] = v;
+                nb_len += 1;
+            }
+        }
+        let neighbors = &nb_buf[..nb_len];
 
-        let can_flip = pos >= k && ice_type[pos] == 'W' && r_count < max_r;
+        let can_flip = pos >= k && !ice_is_r[pos] && r_count < max_r;
 
         if can_flip && rng.random_bool(flip_prob) {
             moves.push(-1);
-            ice_type[pos] = 'R';
+            ice_is_r[pos] = true;
             r_count += 1;
         } else {
-            let novel_neighbors: Vec<usize> = neighbors
-                .iter()
-                .copied()
-                .filter(|&v| v >= k || !shops[v].contains(&cone))
-                .collect();
-            let candidates = if novel_neighbors.is_empty() {
-                &neighbors
-            } else {
-                &novel_neighbors
-            };
+            let cur_key = cone_key(cone_val, cone_len);
+
+            // Novel neighbours: trees (always novel) or shops where cur cone is new.
+            let mut nov_len = 0usize;
+            for &v in neighbors {
+                if v >= k || !shops[v].contains(&cur_key) {
+                    nov_buf[nov_len] = v;
+                    nov_len += 1;
+                }
+            }
+            let candidates: &[usize] = if nov_len == 0 { neighbors } else { &nov_buf[..nov_len] };
 
             let mut greedy_step: Option<usize> = None;
             if USE_GREEDY_BFS {
@@ -137,12 +178,17 @@ fn simulate(
                 for s in 0..k {
                     for (d, first_step, trees) in &precomp[pos][s] {
                         if *d >= best_d { break; }
-                        if Some(*first_step) == prev { continue; }
-                        let mut proj = cone.clone();
-                        for &t in trees {
-                            proj.push(ice_type[t as usize]);
+                        if *first_step == prev { continue; }
+                        // Project cone through the path trees — pure bit arithmetic, no alloc.
+                        let mut pv = cone_val;
+                        let mut pl = cone_len;
+                        for &ti in trees {
+                            if ice_is_r[ti as usize] && pl < 32 {
+                                pv |= 1u32 << pl;
+                            }
+                            pl += 1;
                         }
-                        if shops[s].contains(&proj) { continue; }
+                        if shops[s].contains(&cone_key(pv, pl)) { continue; }
                         best_d = *d;
                         greedy_step = Some(*first_step);
                         break;
@@ -152,36 +198,41 @@ fn simulate(
 
             let mut next = if let Some(step) = greedy_step {
                 step
-            } else if cone.len() >= max_cone_len {
-                let shop_candidates: Vec<usize> =
-                    candidates.iter().copied().filter(|&v| v < k).collect();
-                if !shop_candidates.is_empty() {
-                    weighted_next(&shop_candidates, &mut rng)
+            } else if cone_len as usize >= max_cone_len {
+                let mut sc_len = 0usize;
+                for &v in candidates {
+                    if v < k {
+                        shop_buf[sc_len] = v;
+                        sc_len += 1;
+                    }
+                }
+                if sc_len > 0 {
+                    weighted_next(&shop_buf[..sc_len], shop_attraction, attraction_temp, &mut rng)
                 } else {
                     let mut dist = vec![usize::MAX; n];
-                    let mut queue = VecDeque::new();
+                    bfs_queue.clear();
                     for s in 0..k {
-                        if !shops[s].contains(&cone) {
+                        if !shops[s].contains(&cur_key) {
                             dist[s] = 0;
-                            queue.push_back(s);
+                            bfs_queue.push_back(s);
                         }
                     }
-                    while let Some(v) = queue.pop_front() {
+                    while let Some(v) = bfs_queue.pop_front() {
                         for &u in &adj[v] {
                             if dist[u] == usize::MAX {
                                 dist[u] = dist[v] + 1;
-                                queue.push_back(u);
+                                bfs_queue.push_back(u);
                             }
                         }
                     }
                     if let Some(&best) = candidates.iter().min_by_key(|&&v| dist[v]) {
                         best
                     } else {
-                        weighted_next(candidates, &mut rng)
+                        weighted_next(candidates, shop_attraction, attraction_temp, &mut rng)
                     }
                 }
             } else {
-                weighted_next(candidates, &mut rng)
+                weighted_next(candidates, shop_attraction, attraction_temp, &mut rng)
             };
 
             if !neighbors.contains(&next) {
@@ -189,13 +240,17 @@ fn simulate(
             }
 
             moves.push(next as i32);
-            prev = Some(pos);
+            prev = pos;
             pos = next;
             if pos < k {
-                shops[pos].insert(cone.clone());
-                cone.clear();
+                shops[pos].insert(cur_key);
+                cone_val = 0;
+                cone_len = 0;
             } else {
-                cone.push(ice_type[pos]);
+                if ice_is_r[pos] && cone_len < 32 {
+                    cone_val |= 1u32 << cone_len;
+                }
+                cone_len += 1;
             }
         }
     }
